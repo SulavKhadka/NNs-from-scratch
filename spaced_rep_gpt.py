@@ -141,7 +141,7 @@ class GPTLanguageModel(nn.Module):
 
 
 model = GPTLanguageModel()
-model.to(device)
+model = model.to(device)
 
 
 # tokenizer
@@ -166,11 +166,12 @@ def get_batch(split: str, batch_size: int):
     sample_idxs = torch.randint(len(data)-ctx_len, (batch_size,))
     x = torch.stack([data[i:i+ctx_len] for i in sample_idxs])
     y = torch.stack([data[i+1:i+1+ctx_len] for i in sample_idxs])
-    x.to(device), y.to(device)
+    x, y = x.to(device), y.to(device)
     return x, y
 
 
 # estimate loss
+@torch.no_grad()
 def approximate_loss(num_iters: int):
     model.eval()
     out = {}
