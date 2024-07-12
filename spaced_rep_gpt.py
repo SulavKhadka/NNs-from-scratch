@@ -10,6 +10,23 @@ with open("input.txt", "r") as f:
 vocab = sorted(list(set(corpus_text)))
 vocab_size = len(vocab)
 
+# tokenizer
+# stoi = {c:i for i, c in enumerate(vocab)}
+# itos = {i: c for i, c in enumerate(vocab)}
+
+# encode = lambda x: [stoi[i] for i in x]
+# decode = lambda x: "".join([itos[i] for i in x])
+
+from spaced_rep_gpt_tokenizer import BasicTokenizer
+
+tokenizer = BasicTokenizer()
+tokenizer.train(corpus_text, 300)
+
+vocab = tokenizer.vocab
+vocab_size = len(vocab)
+
+
+
 batch_size = 64
 ctx_len = 256
 n_embed = 128
@@ -145,15 +162,8 @@ class GPTLanguageModel(nn.Module):
 model = GPTLanguageModel()
 model = model.to(device)
 
-# tokenizer
-stoi = {c:i for i, c in enumerate(vocab)}
-itos = {i: c for i, c in enumerate(vocab)}
-
-encode = lambda x: [stoi[i] for i in x]
-decode = lambda x: "".join([itos[i] for i in x])
-
 # data load and train/test split creation
-encoded_corpus = torch.tensor(encode(corpus_text), dtype=torch.long)
+encoded_corpus = torch.tensor(tokenizer.encode(corpus_text), dtype=torch.long)
 split_idx = int(0.9 * len(encoded_corpus))
 
 train_data = encoded_corpus[:split_idx]
@@ -205,4 +215,4 @@ for i in range(train_steps):
 # generation
 x, y = get_batch('train', 1)
 output = model.generate(torch.zeros((1, 1), dtype=torch.long, device=device), max_new_tokens=500)
-print(decode(output[0].tolist()))
+print(tokenizer.decode(output[0].tolist()))
