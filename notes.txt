@@ -1,0 +1,16 @@
+# 07.09.24
+
+going over the GPT_from_scratch code that I implemented. 
+- what is nn.Embedding and how is it different from nn.Linear layer?
+- why do we pass the computation of most layers/blocks through a linearLayer?
+- where do i know to apply dropout?
+- nn.Sequential vs nn.ModuleList
+
+# 07.10.24
+
+implementing GPT tokenizer from scratch
+
+
+# 07.12.24
+
+- i dont understand cross entropy and loss claculation given a forward pass is done and we have the logits of shape (B, ctx_len, vocab_size)
