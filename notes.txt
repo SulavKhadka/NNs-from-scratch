@@ -14,3 +14,10 @@ implementing GPT tokenizer from scratch
 # 07.12.24
 
 - i dont understand cross entropy and loss claculation given a forward pass is done and we have the logits of shape (B, ctx_len, vocab_size)
+- for dropout we the OG gpt applies it after calculating affinities inside AttnHead, after multiHeadAttn, and the feedforward layer. 
+- we want to apply dropout to the parts of the network with the largest/densest param tensors as a general rule/intuition
+- the masked_fill for wei should be applied with a fixed dimension for the self.tril[:T, :T] where T is the current ctx_len of the passed in batch of tensors since they can be less than the full ctx_len
+(at least i think so)
+- loss estimation needs to happen for both train and val data (duhhhhh!)
+
+
