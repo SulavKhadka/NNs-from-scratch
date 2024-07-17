@@ -5,32 +5,10 @@ from dataclasses import dataclass
 from torch import Tensor
 import transformers
 
-@dataclass
-class GPTConfig:
-    vocab_size: int = 50257
-    n_layer: int = 12
-    block_size: int = 1024
-    n_embd: int = 768
-    n_head: int = 12
-    dropout: float = 0.2
-    bias: bool = True
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-# class GPTConfig:
-#     block_size: int = 1024
-#     vocab_size: int = 50304 # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
-#     n_layer: int = 12
-#     n_head: int = 12
-#     n_embd: int = 768
-#     dropout: float = 0.0
-#     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
-
-
 class CasualSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.head_size = config.n_embd
-        self.c_attn = nn.Linear(config.n_embd, 3 * self.head_size, bias=config.bias)
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
@@ -44,16 +22,16 @@ class CasualSelfAttention(nn.Module):
 
     def forward(self, x):
         B, T, C = x.shape
-        q, k, v = self.c_attn(x).split(self.head_size, dim=2)
-        q = q.view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, n_head, T, head_size)
-        k = k.view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, n_head, T, head_size)
-        v = v.view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, n_head, T, head_size)
+        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, n_head, T, head_size)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, n_head, T, head_size)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, n_head, T, head_size)
 
         wei: Tensor = q @ k.transpose(-2, -1) # (B, n_head, T, head_size) @ (B, n_head, head_size, T) -> (B, n_head, T, T)
-        wei = wei * self.head_size ** -0.5
+        wei = wei * k.size(-1) ** -0.5
         wei = wei.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
         wei = wei.softmax(dim=-1)
-        wei = self.bias_dropout(wei)
+        wei = self.attn_dropout(wei)
 
         out: Tensor = wei @ v # (B, n_head, T, T) @ (B, n_head, T, head_size) -> (B, n_head, T, head_size)
         out = out.transpose(1, 2).contiguous().view(B, T, C) # (B, n_head, T, head_size) -> (B, T, n_head, head_size) -> (B, T, C == n_head*head_size)
@@ -85,9 +63,9 @@ class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
 
-        self.ln_1 = nn.LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_1 = nn.LayerNorm(config.n_embd)
         self.attn = CasualSelfAttention(config)
-        self.ln_2 = nn.LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
     
     def forward(self, x):
@@ -96,6 +74,15 @@ class Block(nn.Module):
 
         return x
 
+@dataclass
+class GPTConfig:
+    vocab_size: int = 50257
+    n_layer: int = 12
+    block_size: int = 1024
+    n_embd: int = 768
+    n_head: int = 12
+    dropout: float = 0.0
+    bias: bool = True
 
 class GPT(nn.Module):
     def __init__(self, config):
@@ -111,8 +98,9 @@ class GPT(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
     
     def forward(self, x, targets=None):
+
         tok_embed = self.transformer.wte(x)
-        pos_embed = self.transformer.pte(torch.arange(self.config.block_size, device=x.device))
+        pos_embed = self.transformer.wpe(torch.arange(x.shape[-1], device=x.device))
         x = tok_embed + pos_embed
 
         for layer in self.transformer.h: 
@@ -190,20 +178,52 @@ class GPT(nn.Module):
 
     @torch.no_grad()
     def generate(self, idx, max_new_tokens):
-        
         for _ in range(max_new_tokens):
-            idx_cropped = idx[:, -self.config.block_size:]
-            logits, loss = self(idx_cropped)
+            logits, loss = self(idx)
 
             logits : Tensor= logits[:, -1, :]
             probs = logits.softmax(-1)
 
-            new_tok = torch.multinomial(probs, num_samples=1)
-            idx = torch.cat((idx, new_tok), dim=-1)
+            topk_probs, topk_indices = torch.topk(probs, k=50, dim=-1)
+
+            ix = torch.multinomial(topk_probs, num_samples=1)
+            new_tok = torch.gather(topk_indices, -1, ix)
+            idx = torch.cat((idx, new_tok), dim=1)
         return idx 
 
 
+
+device = 'cpu'
+if torch.cuda.is_available():
+    device = 'cuda'
+elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+    device = 'mps'
+
+print(f"using device: {device}")
+
+
+torch.manual_seed(42)
+torch.cuda.manual_seed(42)
 model = GPT.from_pretrained("gpt2")
+model = GPT(GPTConfig())
 print("woooo!")
 model.eval()
 model = model.to('cuda')
+
+num_return_seq = 5
+max_length = 30
+
+import tiktoken
+enc = tiktoken.get_encoding('gpt2')
+
+tokens = enc.encode("Hello, I'm a language model,")
+tokens = torch.tensor(tokens, dtype=torch.long)
+print(tokens.shape)
+tokens = tokens.unsqueeze(0).repeat(num_return_seq, 1)
+print(tokens.shape)
+x = tokens.to('cuda')
+
+results = model.generate(x, max_new_tokens=max_length)
+
+for result in results:
+    print(enc.decode(result.tolist()))
