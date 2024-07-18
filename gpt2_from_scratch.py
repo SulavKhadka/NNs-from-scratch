@@ -29,13 +29,15 @@ class CasualSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, n_head, T, head_size)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, n_head, T, head_size)
 
-        wei: Tensor = q @ k.transpose(-2, -1) # (B, n_head, T, head_size) @ (B, n_head, head_size, T) -> (B, n_head, T, T)
-        wei = wei * k.size(-1) ** -0.5
-        wei = wei.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
-        wei = wei.softmax(dim=-1)
-        wei = self.attn_dropout(wei)
 
-        out: Tensor = wei @ v # (B, n_head, T, T) @ (B, n_head, T, head_size) -> (B, n_head, T, head_size)
+        # wei: Tensor = q @ k.transpose(-2, -1) # (B, n_head, T, head_size) @ (B, n_head, head_size, T) -> (B, n_head, T, T)
+        # wei = wei * k.size(-1) ** -0.5
+        # wei = wei.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+        # wei = wei.softmax(dim=-1)
+        # wei = self.attn_dropout(wei)
+        # out: Tensor = wei @ v # (B, n_head, T, T) @ (B, n_head, T, head_size) -> (B, n_head, T, head_size)
+        out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+
         out = out.transpose(1, 2).contiguous().view(B, T, C) # (B, n_head, T, head_size) -> (B, T, n_head, head_size) -> (B, T, C == n_head*head_size)
         out = self.c_proj(out)
 
@@ -76,7 +78,7 @@ class Block(nn.Module):
 
 @dataclass
 class GPTConfig:
-    vocab_size: int = 50257
+    vocab_size: int = 50304 # 50257 overriding the actual vocab_size so its a power of 2 factor 
     n_layer: int = 12
     block_size: int = 1024
     n_embd: int = 768
@@ -239,29 +241,41 @@ elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
 
 print(f"using device: {device}")
 
+
+torch.set_float32_matmul_precision('high')
 model = GPT(GPTConfig())
 model.eval()
 model = model.to(device)
+model = torch.compile(model)
 
 num_return_seq = 5
 max_length = 30
+
+import time
 
 torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
-train_loader = DataLoaderLite(4, 32)
+train_loader = DataLoaderLite(B=8, T=1024)
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
 for i in range(50):
+    t0 = time.time()
+    
     x, y = train_loader.get_batch()
     x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
-    logits, loss = model(x, targets=y)
+    with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        logits, loss = model(x, targets=y)
     loss.backward()
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optimizer.step()
-    print(f"loss at step {i} = {loss.item()}")
-
+    
+    torch.cuda.synchronize()
+    t1 = time.time()
+    tok_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)
+    print(f"loss at step {i} = {loss.item():.6f} | norm: {norm:.4f} | time: {(t1 - t0)*1000:.2f} | tok/sec: {tok_per_sec:.2f}")
 
 
 # for result in results:
