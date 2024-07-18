@@ -4,12 +4,14 @@ from torch.nn import functional as F
 from dataclasses import dataclass
 from torch import Tensor
 import transformers
+import tiktoken
 
 class CasualSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.c_proj.NANOGPT_SCALE_INIT = 1
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
@@ -40,7 +42,6 @@ class CasualSelfAttention(nn.Module):
         out = self.resid_dropout(out)
         return out
 
-
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -48,6 +49,7 @@ class MLP(nn.Module):
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
         self.gelu = nn.GELU(approximate='tanh')
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        self.c_proj.NANOGPT_SCALE_INIT = 1
         self.dropout = nn.Dropout(config.dropout)
     
     def forward(self, x):
@@ -56,8 +58,6 @@ class MLP(nn.Module):
         x = self.c_proj(x)
         x = self.dropout(x)
         return x
-
-
 
 class Block(nn.Module):
     def __init__(self, config):
@@ -96,7 +96,23 @@ class GPT(nn.Module):
             'ln_f': nn.LayerNorm(config.n_embd)
         })
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        #weight shapring/tying
+        self.transformer.wte.weight = self.lm_head.weight
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            std = 0.02
+            if hasattr(module, 'NANOGPT_SCALE_INIT'):
+                std *= (2 * self.config.n_layer) ** -0.5
+            torch.nn.init.normal_(module.weight, mean=0, std=std)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0, std=0.02)
     
+
     def forward(self, x, targets=None):
 
         tok_embed = self.transformer.wte(x)
@@ -111,12 +127,7 @@ class GPT(nn.Module):
 
         loss = None
         if targets is not None:
-            B, T, C = logits.shape
-
-            logits = logits[B*T, C]
-            targets = targets[B*T]
-            loss = F.cross_entropy(logits, loss)
-        
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
         return logits, loss
 
     @classmethod
@@ -192,7 +203,34 @@ class GPT(nn.Module):
         return idx 
 
 
+class DataLoaderLite():
+    def __init__(self, B, T):
+        self.B = B
+        self.T = T
 
+        with open("input.txt", "r") as file:
+            text = file.read()
+        enc = tiktoken.get_encoding('gpt2')
+        self.tokens = torch.tensor(enc.encode(text))
+        print(f"loaded {len(self.tokens)} tokens")
+        print(f"One epoch = {len(self.tokens) // (B*T)} batches")
+        self.current_pos = 0
+    
+    def get_batch(self):
+        B, T = self.B, self.T
+        buf = self.tokens[self.current_pos:self.current_pos + B*T + 1]
+        
+        x = buf[:-1].view(B, T)
+        y = buf[1:].view(B, T)
+
+        self.current_pos += B*T
+        if self.current_pos + B*T + 1 > len(self.tokens):
+            self.current_pos = 0
+        
+        return x, y
+
+
+# ----------------------------------------- Training and Inference -----------------------------------------
 device = 'cpu'
 if torch.cuda.is_available():
     device = 'cuda'
@@ -201,29 +239,30 @@ elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
 
 print(f"using device: {device}")
 
-
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
-model = GPT.from_pretrained("gpt2")
 model = GPT(GPTConfig())
-print("woooo!")
 model.eval()
-model = model.to('cuda')
+model = model.to(device)
 
 num_return_seq = 5
 max_length = 30
 
-import tiktoken
-enc = tiktoken.get_encoding('gpt2')
+torch.manual_seed(1337)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(1337)
 
-tokens = enc.encode("Hello, I'm a language model,")
-tokens = torch.tensor(tokens, dtype=torch.long)
-print(tokens.shape)
-tokens = tokens.unsqueeze(0).repeat(num_return_seq, 1)
-print(tokens.shape)
-x = tokens.to('cuda')
+train_loader = DataLoaderLite(4, 32)
 
-results = model.generate(x, max_new_tokens=max_length)
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+for i in range(50):
+    x, y = train_loader.get_batch()
+    x, y = x.to(device), y.to(device)
+    optimizer.zero_grad()
+    logits, loss = model(x, targets=y)
+    loss.backward()
+    optimizer.step()
+    print(f"loss at step {i} = {loss.item()}")
 
-for result in results:
-    print(enc.decode(result.tolist()))
+
+
+# for result in results:
+#     print(enc.decode(result.tolist()))
