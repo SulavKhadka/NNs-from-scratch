@@ -46,9 +46,10 @@ but i dont understand why that is happening? is the embedding vector being large
 
 # 07.19.24
 - Game plan for the day:
-  [ ] Implement weight init in gpt2
-  [ ] Re-implement CausalSelfAttention again for practice as it was confusing me yesterday
-  [ ] Implement DataloaderLite and make the basic training loop for gpt2
+  [x] Implement weight init in gpt2
+	- im not exactly understanding the std dev initialization scaling for the MLP and SelfAttention. I know conceptually its to not blow up the variance in x as residual streams add their weights on every block. but what does that really mean? 
+  [x] Re-implement CausalSelfAttention again for practice as it was confusing me yesterday
+  [x] Implement DataloaderLite and make the basic training loop for gpt2
   [ ] Implement the optimizations of TF32, mixed precision, flash attn, torch.compile, nice numbers 
   [ ] Finish karpathy gpt2 video
   [ ] try and get the BERT model working by making sure we can load the weights from the bert-base-uncased release and run inference on it
