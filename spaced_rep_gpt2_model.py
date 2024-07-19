@@ -277,6 +277,7 @@ for step in range(num_steps):
     with torch.autocast(device_type=device, dtype=torch.bfloat16): # applying auto mixed precision to the layers that take it
         logits, loss = model(x, targets=y)
     loss.backward()
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optim.step()
 
     torch.cuda.synchronize()
