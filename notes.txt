@@ -20,4 +20,35 @@ implementing GPT tokenizer from scratch
 (at least i think so)
 - loss estimation needs to happen for both train and val data (duhhhhh!)
 
+# 07.14.24
 
+- keeping all else the same (on a toy file of taylorswift wiki article text as train data) it looks like when i have:
+  - n_embed = 128 -> train_loss: 1.447 | val_loss: 1.799
+  - n_embed = 384 -> train_loss: 0.829 | val_loss: 1.725
+but i dont understand why that is happening? is the embedding vector being large make it underfit by a lot? why?
+
+- starting GPT-2 karpathy video
+  - need to better understand pytorch operations for effecient implementation
+  - dont know much about the weight initialization and some of the weight typing(tok_embed and lm_head) aspects of the network
+
+# 07.17.24
+- F.cross_entropy() doesnt like multidimensional vectors, so we need to flatetn it out to 2D tensors
+- for a random init network we want every token in the vocab to get roughly uniform probability so no one token is favored to much from the start. random init loss should be about -ln(1/vocab_size) for sanity checking
+- weight sharing/tying the lm_head and the tok_embedding linear layers. why do we do it? need to clarify on this more
+- weight initialization: pytorch already does weight initialization for us in the background(xavier or kaiming_uniform) but we can also manually assign it ourselves and that is what is done in GPT-2
+  - for weights its a normal dist with a stddev of 0.02
+  - for bias its a constant of 0 (this is not the pytorch default, its uniform init by default)
+  - for token embeds its also a normal dist with stddev of 0.02
+  - pos_embeds are normal dist with stddev of 0.01
+
+# 07.18.24
+- what does the sqrt(head_size) do in the attention computation step of `wei=(q @ k.transpose())/sqrt(head_size)`? like what kind of effect conceptually does this scaling have?
+
+# 07.19.24
+- Game plan for the day:
+  [ ] Implement weight init in gpt2
+  [ ] Re-implement CausalSelfAttention again for practice as it was confusing me yesterday
+  [ ] Implement DataloaderLite and make the basic training loop for gpt2
+  [ ] Implement the optimizations of TF32, mixed precision, flash attn, torch.compile, nice numbers 
+  [ ] Finish karpathy gpt2 video
+  [ ] try and get the BERT model working by making sure we can load the weights from the bert-base-uncased release and run inference on it
