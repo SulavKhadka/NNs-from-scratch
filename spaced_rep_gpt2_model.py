@@ -4,12 +4,13 @@ import torch.nn as nn
 from torch.nn import functional as F
 import tiktoken
 import math
+import time
 from dataclasses import dataclass
 
 @dataclass
 class GPTConfig:
     block_size: int = 1024
-    vocab_size: int = 50257 # 50,000 BPE iterations + 256 unicode bytes + 1 special token
+    vocab_size: int = 50304 # 50,000 BPE iterations + 256 unicode bytes + 1 special token
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
@@ -40,12 +41,13 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
 
-        wei: Tensor = (q @ k.transpose(-2, -1)) / math.sqrt(k.size(-1)) # (B, n_head, T, head_size) @ (B, n_head, head_size, T) -> (B, n_head, T, T)
-        wei = wei.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf')) # cant forget to crop the bias mask to T(num_tokens) of the current input x
-        wei = wei.softmax(dim=-1)
-        wei = self.attn_dropout(wei)
+        # wei: Tensor = (q @ k.transpose(-2, -1)) / math.sqrt(k.size(-1)) # (B, n_head, T, head_size) @ (B, n_head, head_size, T) -> (B, n_head, T, T)
+        # wei = wei.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf')) # cant forget to crop the bias mask to T(num_tokens) of the current input x
+        # wei = wei.softmax(dim=-1)
+        # wei = self.attn_dropout(wei)
 
-        out: Tensor = wei @ v # (B, n_head, T, T) @ (B, n_head, T, head_size) -> (B, n_head, T, head_size)
+        # out: Tensor = wei @ v # (B, n_head, T, T) @ (B, n_head, T, head_size) -> (B, n_head, T, head_size)
+        out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         out = out.transpose(1, 2).contiguous().view(B, T, C) # (B, n_head, T, head_size) -> (B, T, n_head, head_size) -> (B, T, C)
         out = self.c_proj(out)
         out = self.resid_dropout(out)
@@ -256,19 +258,28 @@ print(f"using device: {device}")
 
 # ---------------------------------------------- Training Loop ----------------------------------------------
 
+torch.set_float32_matmul_precision('high')
 model: GPT = GPT(GPTConfig)
-model.to(device)
+model = model.to(device)
+model = torch.compile(model)
 
 num_steps = 50
-dataloader = DataloaderLite(B=4, T=1024)
-optim = torch.optim.AdamW(model.parameters(), lr=3e-4)
+dataloader = DataloaderLite(B=8, T=1024)
+optim = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
 
 for step in range(num_steps):
+    t0 = time.time()
+
     x, y = dataloader.get_batch()
     x, y = x.to(device), y.to(device)
 
     optim.zero_grad()
-    logits, loss = model(x, targets=y)
+    with torch.autocast(device_type=device, dtype=torch.bfloat16): # applying auto mixed precision to the layers that take it
+        logits, loss = model(x, targets=y)
     loss.backward()
     optim.step()
-    print(f"step {step}: loss = {loss.item()}")
+
+    torch.cuda.synchronize()
+    t1 = time.time()
+
+    print(f"step {step}: loss = {loss.item():.3f} | time = {(t1 - t0)*1000:.4f} | tok/sec = {(dataloader.B*dataloader.T)/(t1 - t0):.3f}")
