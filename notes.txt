@@ -52,5 +52,13 @@ but i dont understand why that is happening? is the embedding vector being large
 	- messed up on the autoregressive mask(bias) by initializing to n_embd instead of block_size. it still worked though which is concerning. I see why its so easy to introduce subtle bugs into DL code now.
   [x] Implement DataloaderLite and make the basic training loop for gpt2
   [x] Implement the optimizations of TF32, mixed precision, flash attn, torch.compile, nice numbers 
-  [ ] Finish karpathy gpt2 video
+  [x] Finish karpathy gpt2 video
+	- didnt do the ddp portions but did add the configure_optimizers method to add weight decay to the layers involved in matmul
   [ ] try and get the BERT model working by making sure we can load the weights from the bert-base-uncased release and run inference on it
+
+# 07.21.24
+- game plan:
+  [-] try and get the BERT model working by making sure we can load the weights from the bert-base-uncased release and run inference on it
+	- struggling with how to create masks for the inputs so the attention calculation is faithful to BERT
+	- i understand how to create the masks for MLM objective still not so clear on NSP, but one step at a time. chatGPT convo for this: https://chatgpt.com/c/c11ed3d9-bd70-40ba-aa50-2f99eb063882
+	- got most of the model written and it mostly matches the hf impl. but have some weirdness with the attn_mask shape, weight tying, and other minor things that arent correct. working on it tomorrow. chatGPT convo for this: https://chatgpt.com/c/9f4ef798-b5c5-4206-b56a-f84d5b68fbcf
