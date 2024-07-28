@@ -4,39 +4,46 @@ from torch.nn import functional as F
 from torch import Tensor
 from tqdm import tqdm
 
-with open("input.txt", "r") as f:
+with open("mishmash_input.txt", "r") as f:
     corpus_text = f.read()
 
-vocab = sorted(list(set(corpus_text)))
-vocab_size = len(vocab)
+# char tokenizer
+# vocab = sorted(list(set(corpus_text)))
+# vocab_size = len(vocab)
 
-# tokenizer
+# print(vocab)
+
 # stoi = {c:i for i, c in enumerate(vocab)}
 # itos = {i: c for i, c in enumerate(vocab)}
 
 # encode = lambda x: [stoi[i] for i in x]
 # decode = lambda x: "".join([itos[i] for i in x])
 
-from spaced_rep_gpt_tokenizer import BasicTokenizer
+# BPE tokenizer
+from spaced_rep_gpt_tokenizer import BasicTokenizer, RegexTokenizer
 
-tokenizer = BasicTokenizer()
-tokenizer.train(corpus_text, 300)
+tokenizer = RegexTokenizer()
+tokenizer.train(corpus_text, 384)
+
+encode = lambda x: tokenizer.encode(x)
+decode = lambda x: tokenizer.decode(x)
 
 vocab = tokenizer.vocab
 vocab_size = len(vocab)
 
+with open("notebooks/output_text.txt", "r") as f:
+    corpus_text = f.read()
 
-
-batch_size = 64
+batch_size = 128
 ctx_len = 256
-n_embed = 128
+n_embed = 256
 num_heads = 4
-num_layers = 4
-dropout_rate = 0.2
+num_layers = 6
+dropout_rate = 0.25
 
-train_steps = 5000
-eval_interval = 300
-eval_iters = 200
+train_steps = 25_000
+eval_interval = 500
+eval_iters = 250
 learning_rate = 3e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -163,9 +170,9 @@ model = GPTLanguageModel()
 model = model.to(device)
 
 # data load and train/test split creation
-encoded_corpus = torch.tensor(tokenizer.encode(corpus_text), dtype=torch.long)
+encoded_corpus = torch.tensor(encode(corpus_text), dtype=torch.long)
 split_idx = int(0.9 * len(encoded_corpus))
-
+print(split_idx)
 train_data = encoded_corpus[:split_idx]
 val_data = encoded_corpus[split_idx:]
 
@@ -187,7 +194,7 @@ def approximate_loss(num_iters: int):
     for split in ['train', 'val']:
         losses = torch.zeros(num_iters)
         for i in range(num_iters):
-            xb, yb = get_batch('train', batch_size)
+            xb, yb = get_batch(split, batch_size)
             logits, loss = model(xb, targets=yb)
             losses[i] = loss.item()
         out[split] = losses.mean()
@@ -200,11 +207,22 @@ def approximate_loss(num_iters: int):
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
 print(f"training on {device}")
-for i in range(train_steps):
+
+from torch.utils.tensorboard import SummaryWriter
+
+# Add TensorBoard SummaryWriter
+writer = SummaryWriter()
+
+# Edit the training loop to log losses to TensorBoard
+for i in tqdm(range(train_steps)):
     if i % eval_interval == 0:
         losses = approximate_loss(eval_iters)
         print(f"step: {i} | train loss: {losses['train']} | val loss: {losses['val']}")
-    
+        
+        # Log losses to TensorBoard
+        writer.add_scalar('Loss/train', losses['train'], i)
+        writer.add_scalar('Loss/val', losses['val'], i)
+
     xb, yb = get_batch('train', batch_size)
     logits, loss = model(xb, targets=yb)
     
@@ -212,7 +230,10 @@ for i in range(train_steps):
     loss.backward()
     optimizer.step()
 
+# Close the TensorBoard writer after training is finished
+writer.close()
+
 # generation
 x, y = get_batch('train', 1)
 output = model.generate(torch.zeros((1, 1), dtype=torch.long, device=device), max_new_tokens=500)
-print(tokenizer.decode(output[0].tolist()))
+print(decode(output[0].tolist()))

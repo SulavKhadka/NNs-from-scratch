@@ -1,4 +1,5 @@
 import regex as re
+import json
 
 '''
 Write the BasicTokenizer class, with the following three core functions:
@@ -31,6 +32,19 @@ class BasicTokenizer():
                 processed_text.append(text[i])
                 i += 1
         return processed_text
+
+    def save(self, file_path: str):
+        with open(file_path, "w") as file:
+            json.dump({
+                "merges": self.merges,
+                "vocab": self.vocab
+            }, file)
+
+    def load(self, file_path: str):
+        with open(file_path, "r") as file:
+            tokenizer_json = json.load(file)
+            self.vocab = tokenizer_json['vocab']
+            self.merges = tokenizer_json['merges']
 
     def train(self, text, vocab_size, verbose=False):
         # convert text into utf-8 encoded bytes
@@ -103,15 +117,18 @@ class RegexTokenizer():
                 i += 1
         return processed_text
 
-    def _get_bigram_freq_by_regex_matches(self, text):
-        split_matches = re.findall(self.regex_pattern, text)
-        stats = {}
-        for match in split_matches:
-            encoded_match = list(match.encode('utf-8'))
-            match_stats = self._get_bigram_freq(encoded_match)
-            for k, v in match_stats.items():
-                stats[k] = stats.get(k, 0) + v
-        return stats
+    def save(self, file_path: str):
+        with open(file_path, "w") as file:
+            json.dump({
+                "merges": self.merges,
+                "vocab": self.vocab
+            }, file)
+
+    def load(self, file_path: str):
+        with open(file_path, "r") as file:
+            tokenizer_json = json.load(file)
+            self.vocab = tokenizer_json['vocab']
+            self.merges = tokenizer_json['merges']
 
     def train(self, text, vocab_size, verbose=False):
         split_matches = re.findall(self.regex_pattern, text)
@@ -140,7 +157,7 @@ class RegexTokenizer():
         for (c1, c2), v in self.merges.items():
             self.vocab[v] = self.vocab[c1] + self.vocab[c2]
 
-    def encode(self, text):
+    def _encode(self, text):
         # encode to utf-8 bytes
         encoded_utf8_text = list(text.encode('utf-8'))
         # print(encoded_utf8_text)
@@ -157,25 +174,34 @@ class RegexTokenizer():
             # print(encoded_utf8_text)
         return encoded_utf8_text
 
+    def encode(self, text):
+        # split into matches
+        split_matches = re.findall(self.regex_pattern, text)
+        encoded_text = []
+        for match in split_matches:
+            encoded_text.extend(self._encode(match))
+        return encoded_text
+
     def decode(self, token_list):
         return b"".join(self.vocab[i] for i in token_list).decode('utf-8')
 
 
 
-with open("taylorswift.txt", "r") as file:
-    text = file.read()
+if __name__ == "__main__":
+    with open("taylorswift.txt", "r") as file:
+        text = file.read()
 
-basic_tokenizer = BasicTokenizer()
-regex_tokenizer = RegexTokenizer()
-basic_tokenizer.train(text, 300)
-regex_tokenizer.train(text, 300)
+    basic_tokenizer = BasicTokenizer()
+    regex_tokenizer = RegexTokenizer()
+    basic_tokenizer.train(text, 300)
+    regex_tokenizer.train(text, 300)
 
 
-print(basic_tokenizer.merges, len(basic_tokenizer.merges))
-print(regex_tokenizer.merges, len(regex_tokenizer.merges))
-print("-"*50)
-text = text[:5000]
-print(text)
-print(basic_tokenizer.decode(basic_tokenizer.encode(text)))
-print(regex_tokenizer.decode(regex_tokenizer.encode(text)))
-print(basic_tokenizer.decode(basic_tokenizer.encode(text)) == regex_tokenizer.decode(regex_tokenizer.encode(text)))
+    print(basic_tokenizer.merges, len(basic_tokenizer.merges))
+    print(regex_tokenizer.merges, len(regex_tokenizer.merges))
+    print("-"*50)
+    text = text[:5000]
+    print(text)
+    print(basic_tokenizer.decode(basic_tokenizer.encode(text)))
+    print(regex_tokenizer.decode(regex_tokenizer.encode(text)))
+    print(basic_tokenizer.decode(basic_tokenizer.encode(text)) == regex_tokenizer.decode(regex_tokenizer.encode(text)))

@@ -2,6 +2,9 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from torch import Tensor
+import json
+import base64
+from tqdm import tqdm
 
 # GPT LLM
 num_train_steps = 5000
@@ -9,9 +12,8 @@ learning_rate = 3e-4
 batch_size = 16
 eval_iter = 250
 
-vocab_size = 512
 ctx_len = 64
-n_embed = 384
+n_embed = 128
 num_layers = 6
 num_heads = 4
 dropout_rate = 0.25
@@ -37,7 +39,7 @@ class AttentionHead(nn.Module):
         self.key = nn.Linear(n_embed, head_size)
         self.value = nn.Linear(n_embed, head_size)
         self.dropout = nn.Dropout(dropout_rate)
-        self.register_buffer('tril', torch.ones(ctx_len, ctx_len, device=device))
+        self.register_buffer('tril', torch.tril(torch.ones(ctx_len, ctx_len)))
     
     def forward(self, x):
         B, T, C = x.shape
@@ -143,10 +145,25 @@ class BasicTokenizer():
                 i += 1
         return processed_encoded_text
 
+    def save(self, file_path):
+        with open(file_path, "w") as file:
+            formatted_output = {
+                "vocab": {k: base64.b64encode(v).decode('utf-8') for k, v in self.vocab.items()},
+                "merges": {str(k): v for k, v in self.merges.items()}
+            }
+            json.dump(formatted_output, file)
+
+    def load(self, file_path):
+        with open(file_path, "r") as file:
+            tokenizer_json = json.load(file)
+            
+        self.vocab = {int(k): base64.b64decode(v) for k, v in tokenizer_json['vocab'].items()}
+        self.merges = {tuple(map(int, k.strip('()').split(', '))): v for k, v in tokenizer_json['merges'].items()}
+
     def train(self, text: str, vocab_size: int):
         num_merges = vocab_size - 256
         encoded_text = list(text.encode('utf-8'))
-        for i in range(num_merges):
+        for i in tqdm(range(num_merges)):
             stats = self._get_stats(encoded_text)
             most_freq_bigram = max(stats, key=stats.get)
             self.merges[most_freq_bigram] = i + 256
@@ -173,12 +190,18 @@ class BasicTokenizer():
 
 
 # load text corpus and tokenize it
-with open("taylorswift.txt", "r") as file:
+with open("mishmash_input.txt", "r") as file:
+    tokenizer_text = file.read()
+
+with open("notebooks/output_text.txt", "r") as file:
     corpus_text = file.read()
 
-vocab_size = 275
+vocab_size = 384
 tokenizer = BasicTokenizer()
-tokenizer.train(corpus_text, vocab_size)
+# tokenizer.train(tokenizer_text, vocab_size)
+# tokenizer.save(f"./basic_tokenizer_{vocab_size}.json")
+tokenizer.load(f"./basic_tokenizer_{vocab_size}.json")
+del tokenizer_text
 
 tokenized_text = torch.tensor(tokenizer.encode(corpus_text))
 split_idx = int(0.9 * len(tokenized_text))
@@ -230,5 +253,5 @@ print(f"Final Loss | train_loss: {losses['train']} | val_loss: {losses['val']}")
 
 
 # generation
-output = model.generate(torch.zeros((1, 1), dtype=torch.long, device=device), max_new_tokens=50)
+output = model.generate(torch.zeros((1, 1), dtype=torch.long, device=device), max_new_tokens=150)
 print(tokenizer.decode(output[0].tolist()))
