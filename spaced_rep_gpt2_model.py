@@ -6,6 +6,7 @@ import tiktoken
 import math
 import time
 from dataclasses import dataclass
+import inspect
 
 @dataclass
 class GPTConfig:
@@ -41,13 +42,13 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
 
-        # wei: Tensor = (q @ k.transpose(-2, -1)) / math.sqrt(k.size(-1)) # (B, n_head, T, head_size) @ (B, n_head, head_size, T) -> (B, n_head, T, T)
-        # wei = wei.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf')) # cant forget to crop the bias mask to T(num_tokens) of the current input x
-        # wei = wei.softmax(dim=-1)
-        # wei = self.attn_dropout(wei)
+        wei: Tensor = (q @ k.transpose(-2, -1)) / math.sqrt(k.size(-1)) # (B, n_head, T, head_size) @ (B, n_head, head_size, T) -> (B, n_head, T, T)
+        wei = wei.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf')) # cant forget to crop the bias mask to T(num_tokens) of the current input x
+        wei = wei.softmax(dim=-1)
+        wei = self.attn_dropout(wei)
 
-        # out: Tensor = wei @ v # (B, n_head, T, T) @ (B, n_head, T, head_size) -> (B, n_head, T, head_size)
-        out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        out: Tensor = wei @ v # (B, n_head, T, T) @ (B, n_head, T, head_size) -> (B, n_head, T, head_size)
+        # out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         out = out.transpose(1, 2).contiguous().view(B, T, C) # (B, n_head, T, head_size) -> (B, T, n_head, head_size) -> (B, T, C)
         out = self.c_proj(out)
         out = self.resid_dropout(out)
@@ -115,6 +116,26 @@ class GPT(nn.Module):
         # if embedding layer apply std dev of 0.02 and mean of 0
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0, std=0.02)
+
+    def _configure_optimizers(self, weight_decay, learning_rate, device):
+        # getting a dict(parameter_name: parameters) of params that requires gradient updates
+        param_dict = {pn: p for pn, p in self.named_parameters()}
+        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+
+        # we want to apply the weight decay to layers/groups that are going to be matmul'ed not to the 1D scalars(is that the right word?)
+        decay_group = [p for _, p in param_dict.items() if p.dim() >= 2]
+        non_decay_group = [p for _, p in param_dict.items() if p.dim() < 2]
+        optim_groups = [
+            {'params': decay_group, 'weight_decay': weight_decay},
+            {'params': non_decay_group, 'weight_decay': 0.0}
+        ]
+
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and 'cuda' in device
+
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, fused=use_fused, betas=(0.9, 0.95), eps=1e-8)
+        return optimizer
+
 
     def forward(self, x, targets=None):
         B, T = x.shape
@@ -192,8 +213,6 @@ class GPT(nn.Module):
         return model
 
     def generate(self, idx, max_new_tokens: int):
-        B, T = idx.shape
-
         for i in range(max_new_tokens):
             idx_crop = idx[:, -self.config.block_size:]
             logits, loss = self(idx_crop)
@@ -263,24 +282,33 @@ model: GPT = GPT(GPTConfig)
 model = model.to(device)
 model = torch.compile(model)
 
+total_batch_tokens = 524288 # 2**19
+B = 8
+T = 1024
+assert total_batch_tokens % (B*T) == 0 
+grad_accum_steps = total_batch_tokens // (B * T)
+print(f"total batch tokens: {total_batch_tokens} | grad accum steps: {grad_accum_steps}")
+
 num_steps = 50
-dataloader = DataloaderLite(B=8, T=1024)
+dataloader = DataloaderLite(B, T)
 optim = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
 
 for step in range(num_steps):
     t0 = time.time()
-
-    x, y = dataloader.get_batch()
-    x, y = x.to(device), y.to(device)
-
     optim.zero_grad()
-    with torch.autocast(device_type=device, dtype=torch.bfloat16): # applying auto mixed precision to the layers that take it
-        logits, loss = model(x, targets=y)
-    loss.backward()
+    loss_accum = 0.0
+    for i in range(grad_accum_steps):
+        x, y = dataloader.get_batch()
+        x, y = x.to(device), y.to(device)
+        with torch.autocast(device_type=device, dtype=torch.bfloat16): # applying auto mixed precision to the layers that take it
+            logits, loss = model(x, targets=y)
+        loss = loss / grad_accum_steps
+        loss_accum += loss.detach()
+        loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optim.step()
 
     torch.cuda.synchronize()
     t1 = time.time()
 
-    print(f"step {step}: loss = {loss.item():.3f} | time = {(t1 - t0)*1000:.4f} | tok/sec = {(dataloader.B*dataloader.T)/(t1 - t0):.3f}")
+    print(f"step {step}: loss = {loss_accum:.3f} | time = {(t1 - t0)*1000:.4f} | tok/sec = {(dataloader.B*dataloader.T*grad_accum_steps)/(t1 - t0):.3f}")
