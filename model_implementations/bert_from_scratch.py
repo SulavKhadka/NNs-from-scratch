@@ -162,15 +162,18 @@ class skBERTForMaskedLM(nn.Module):
 
     def generate(self, input_tensor: Tensor, attn_mask: Tensor, token_type_ids: Tensor, max_new_tokens: int):
         for _ in range(max_new_tokens):
-            input_tensor = 
+            input_tensor = torch.cat((input_tensor, torch.full((input_tensor.size(0), 1), 103)), dim=-1)
             input_cropped = input_tensor[:, -self.block_size:]
 
             logits, loss = self(input_cropped)
             logits = logits[:, -1, :]
             probs = F.softmax(logits, dim=-1)
 
-            new_tok = torch.multinomial(probs, num_samples=1)
-            input_tensor = torch.cat((input_tensor, new_tok), dim=-1)
+            topk_probs, topk_idxs = torch.topk(probs, k=25, dim=-1)
+            sampled_tok = torch.multinomial(topk_probs, num_samples=1) # torch.Size([3, 1])
+            new_tok = torch.gather(topk_idxs, -1, sampled_tok) # torch.Size([3, 1])
+
+            input_tensor[:, -1] = new_tok.squeeze() # expand(torch.LongTensor{[3, 1]}, size=[3]): the number of sizes provided (1) must be greater or equal to the number of dimensions in the tensor (2)
         return input_tensor
 
 def mask_inputs_for_mlm(inputs: Tensor, tokenizer: BertTokenizer, mlm_probability: float = 0.15):
@@ -195,9 +198,9 @@ print('Woo!')
 tokenizer: BertTokenizer = BertTokenizer.from_pretrained("google-bert/bert-base-uncased")
 
 input_docs = [
-    "I'm a language model, ",
-    "I'm a language model, ",
-    "I'm a language model, "
+    "I'm a ",
+    "I'm a ",
+    "I'm a "
 ]
 tokenized_inputs = tokenizer(input_docs)
 
