@@ -62,3 +62,52 @@ but i dont understand why that is happening? is the embedding vector being large
 	- struggling with how to create masks for the inputs so the attention calculation is faithful to BERT
 	- i understand how to create the masks for MLM objective still not so clear on NSP, but one step at a time. chatGPT convo for this: https://chatgpt.com/c/c11ed3d9-bd70-40ba-aa50-2f99eb063882
 	- got most of the model written and it mostly matches the hf impl. but have some weirdness with the attn_mask shape, weight tying, and other minor things that arent correct. working on it tomorrow. chatGPT convo for this: https://chatgpt.com/c/9f4ef798-b5c5-4206-b56a-f84d5b68fbcf
+
+# 07.28.24
+- havent focused on this for a bit. because i got frustrated trying to match the hf implementation to load inthe weights as is to make sure it works(in full transparency, i didnt try very hard and got frustrated instead)
+- so we try again today, i think its how im loading the weights, we make a few different choices in tensor representations internally but all the shapes and sizes should be there just needs some manipulation to fit into my custom construct. 
+- game plan:
+  [ ] make a custom from_pretrained() class which maps the hf model weights to our model internal representation.
+	- this involves jsut looking at the state_dict of hf_model and my sk_model and seeing which layers are different and how i can manipulate the weights to properly load into mine.
+
+# 07.29.24
+- Exploring some other model arches to see which one would be good to tackle next. The current choices are Qwen2, DeBerta, and MobileLLM.
+- Qwen2:
+  Tokenizer:
+	- byte-level BPE tokenizer
+	- vocab: 151,643 regular tokens + 3 special tokens
+  Arch:
+	- GQA(Grouped Query Attention) instead of MHA(Multi Headed Attention)
+	- DCA(Dual Chunk Attention): segment long sequences into chunks of manageable size, positional info between tokens within and across chunks
+	- YARN for rescaling attn weights for ctx_len extrapolation
+	- SwiGLU for activation: not in pytorch and need to implement on my own
+	- Rotary Position Embeddings for positional Embedding
+	- QKV bias for attn
+	- RMSNorm for pre-norm: it's in torch.nn.RMSNorm
+- I'm going to implement Qwen2 as practice.
+- The hard part will be trying to understand and implement dual chunk attention, but im thinking for first pass I can just do regular attention and later try to cover the case of input being longet than the ctx_len
+
+# 07.30.24
+- maybe llama is the thing to implement because it doesnt do Dual Chunk Attention but has the GQA, swiGLU, RoPE, and RMSNorm
+- we are going with Llama-2 paper to implement.
+- Llama-2:
+  Tokenizer:
+	- BPE tokenizer from SentencePiece: byte-level decompose fo unknown UTF-8 chars
+	- all numbers get split into individual digits
+	- vocab: 32k tokens
+  Arch:
+	- GQA(Grouped Query Attention)
+	- pre-norm with RMSNorm
+	- swiGLU as the activation function
+	- RoPE(Rotary Positional Embeddings): only for Q, K vectors inside attention. (does this mean no pos encoding for V?)
+	- KV cache
+- in llama's MLP layer there is up, down, and gate proj Linear layers. dont have a good intuition on what these do.
+  - looked it up and it makes a lot more sense now.
+  - up_proj: takes the result coming out of attn_layer and projects it to a higher dimensional vector (therefore the 'up' term)
+  - down_proj: takes that intermediate representation of the expanded high dimensional vector and projects it back down to the attn_layer hidden_dim size
+  - gate_proj: also performs the same vector wideninig projection as the up_proj and gets multiplied with it as an additional layer. says for controlling the flow of info, which kinda makes sense since it gets multiplied into the up_proj result before continuing but not sure exactly how it changes them to 'gate' something
+- starting the implementation to match the hf model so i can load in the 7B weights but as always not sure where to put the dropout layers. will look that up later.
+- got the general model down, with MLP(w/ SwiGLU) and Block layer done.
+- working with the GQA module. understanding how to reshape tensors to make the different n_head and kv_head sizes to compute together. I think i have the hang of it. but more to do tomorrow.
+  
+	
