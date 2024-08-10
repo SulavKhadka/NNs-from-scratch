@@ -110,4 +110,24 @@ but i dont understand why that is happening? is the embedding vector being large
 - got the general model down, with MLP(w/ SwiGLU) and Block layer done.
 - working with the GQA module. understanding how to reshape tensors to make the different n_head and kv_head sizes to compute together. I think i have the hang of it. but more to do tomorrow.
   
-	
+# 07.31.24
+- continuing implementing llama-2 today. GQA is almost done, then moving on to rope embeddings inside of the attn mechanism, then KV cache
+- before continuing im actually having to learn einops. gonna spend like 2 hours on it and then get back to the implementation.
+- Einops:
+  - Free Indices: idxs specified in the output
+  - Summation Indicies: idxs that appear in the input but not in the output. any idxs like this will get summed over therefore the name `summation indicies`
+  - Rules:
+	- repeating leters in different inputs means they will be multiplied and the products will be the output. ex: `ik,kj->ij` (k is repeating so k across the inputs will get multiplied)
+	- omitting a letter means that that axis will be summed. ex: `i->` (since i doesnt exist in the output that means we will sum the entire axis i and give that as output)
+  - this shit is tough when you dont know linear algebra very well
+
+# 08.08.24
+- havent done this in a while. refocusing now
+- to understand and slowly work through einops, going to try and replace the original GPT implementation with einsum based one to get the hang of it.
+- Implemented it in gpt where the each attention head is separately calculated in its own class (so only 3 dimensions to deal with in einsum)
+- Implemented it in gpt2 where we do multiHeadedAttention as one class using tensor operations for all the heads (so 4 dimensional einsum attention)
+- shit is hard and confusing, should have payed attn in college. didnt get to run it GPT and GPT2 though, just crosschecked to see that wei.allclose(wei_einsum) was true in both instances. 
+
+# 08.09.24
+- implemented the attention operation without einops in llama2, now need to add rope to make it complete. KV cache and stuff we shall worry about later. just gotta be able to load and inference with pre-existing model weights they got.
+

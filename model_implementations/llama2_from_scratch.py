@@ -48,6 +48,12 @@ class GroupedQueryAttention(nn.Module):
         wei = wei.softmax(-1)
 
         out = wei @ value # (B, n_heads // kv_heads, kv_heads, T, T) @ (B, n_heads // kv_heads, kv_heads, T, C // kv_heads) -> (B, n_heads // kv_heads, kv_heads, T, C // kv_heads)
+        out = out.transpose(2, 3).contigous().view(B, self.n_heads // self.n_kv_heads, T, C) # (B, n_heads // kv_heads, kv_heads, T, C // kv_heads) -> (B, n_heads // kv_heads, T, kv_heads, C // kv_heads) -> (B, n_heads // kv_heads, T, C)
+        out = out.transpose(1, 2)[:, :, 0, :] # (B, n_heads // kv_heads, T, C) -> (B, T, n_heads // kv_heads, C) -> (B, T, C)
+        
+        # TODO: dropout before returning?
+        return out
+
 
 class MLP(nn.Module):
     def __init__(self, config: LlamaConfig) -> None:
@@ -89,6 +95,7 @@ class Llama2Model(nn.Module):
     def forward(self, x):
         # x.shape = (B, T)
         x = self.embed_tokens(x) # (B, T, C)
+        
         for block in self.layers:
             x = block(x)
         x = self.norm(x)

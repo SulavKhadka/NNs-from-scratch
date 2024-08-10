@@ -38,16 +38,22 @@ class CausalSelfAttention(nn.Module):
 
         exploded_attn: Tensor = self.c_attn(x)
         q, k, v = exploded_attn.split(self.n_embd, dim=-1)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, T, C) -> (B, T, n_head, head_size) -> (B, n_head, T, head_size)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        # q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, T, C) -> (B, T, n_head, head_size) -> (B, n_head, T, head_size)
+        # k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        # v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
 
-        wei: Tensor = (q @ k.transpose(-2, -1)) / math.sqrt(k.size(-1)) # (B, n_head, T, head_size) @ (B, n_head, head_size, T) -> (B, n_head, T, T)
+        # (B, n_head, T, head_size) @ (B, n_head, head_size, T) -> (B, n_head, T, T)
+        # wei: Tensor = (q @ k.transpose(-2, -1)) / math.sqrt(k.size(-1)) 
+        wei = torch.einsum('bthq, bThq -> bhtT', [q.view(B, T, self.n_head, C // self.n_head), k.view(B, T, self.n_head, C // self.n_head)])
+        
         wei = wei.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf')) # cant forget to crop the bias mask to T(num_tokens) of the current input x
         wei = wei.softmax(dim=-1)
         wei = self.attn_dropout(wei)
 
-        out: Tensor = wei @ v # (B, n_head, T, T) @ (B, n_head, T, head_size) -> (B, n_head, T, head_size)
+        # (B, n_head, T, T) @ (B, n_head, T, head_size) -> (B, n_head, T, head_size)
+        # out: Tensor = wei @ v 
+        out = torch.einsum('bqtT, bTqh -> bqth', [wei, v])
+        
         # out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         out = out.transpose(1, 2).contiguous().view(B, T, C) # (B, n_head, T, head_size) -> (B, T, n_head, head_size) -> (B, T, C)
         out = self.c_proj(out)
