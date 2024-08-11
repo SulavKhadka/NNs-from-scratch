@@ -130,4 +130,11 @@ but i dont understand why that is happening? is the embedding vector being large
 
 # 08.09.24
 - implemented the attention operation without einops in llama2, now need to add rope to make it complete. KV cache and stuff we shall worry about later. just gotta be able to load and inference with pre-existing model weights they got.
+- watched a video on rope embeddings implementation in llama2(https://www.youtube.com/watch?v=oM4VmoabDAI&t=4087s) and looking at impl in a git repo(https://github.com/aju22/LLaMA2/blob/main/model.py#L24)
 
+# 08.10.24
+- will replace the torch vector operations with einsum ops after I am able to load up the llama2 weights and perform inference on it.
+- trying im implement rope into llama2 today
+- RoPE notes:
+  - cant apply rope to odd number head_dim vectors, as we block them by 2 each(pairs)
+  -
