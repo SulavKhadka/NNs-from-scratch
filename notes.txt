@@ -137,4 +137,12 @@ but i dont understand why that is happening? is the embedding vector being large
 - trying im implement rope into llama2 today
 - RoPE notes:
   - cant apply rope to odd number head_dim vectors, as we block them by 2 each(pairs)
-  -
+- got rope implemented into Llama2 model but not ableto run a verify yet. plus i think im missing a dimension of taking in all multiple heads and their vectors at once into my RoPE implemenation.
+
+# 08.12.24
+- Learned Ive been doing GQA wrong. the head dim cant be different between q and k,v because then the shapes dont match.
+- To ensure that the shapes match while still making sure different numbers of k,v to q values is used we make the linear layer project:
+	- q_proj =  n_embed -> n_heads * head_dim
+	- k_proj, v_proj = n_embed -> kv_heads * head_dim
+	- where head_dim = n_embed // n_heads
+- ok now the GQA is properly fixed and rope embeddings calculations for q and k have been implemented.

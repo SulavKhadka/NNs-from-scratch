@@ -18,15 +18,47 @@ class LlamaConfig:
     batch_size: int = 32
     ctx_len: int = 4096
 
+    device: str = 'cuda'
+
+class RotaryPositionEmbedding(nn.Module):
+    def __init__(self, config: LlamaConfig):
+        super().__init__()
+
+        self.head_dim = config.n_embd // config.n_heads
+
+        # compute the theta_freqs since they are constant vectors applied to any given input x.
+        theta_numerator = torch.arange(0, self.head_dim, 2, dtype=torch.float32)
+        thetas = 1 / torch.pow(10_000, theta_numerator / self.head_dim).to(config.device)
+        m = torch.arange(0, config.ctx_len).to(config.device)
+        
+        freqs = torch.einsum('i, j -> ij', [m, thetas]).float()
+        self.freqs_complex = torch.polar(torch.ones_like(freqs), freqs)
+        self.register_buffer('freqs_complex', self.freqs_complex)
+
+    def forward(self, x):
+        # x.shape = (B, ctx_len, n_heads, head_dim) where n_heads can be either [n_heads, n_kv_heads]
+        x = x.reshape(*x.shape[:-1], -1, 2)
+        x_complex = torch.view_as_complex(x) # (B, ctx_len, n_heads, head_dim // 2, 2) -> (B, ctx_len, n_heads, head_dim // 2)
+
+        self.freqs_complex = self.freqs_complex.unsqueeze(0).unsqueeze(2) # (ctx_len, head_dim // 2) -> (1, ctx_len, head_dim // 2) -> (1, ctx_len, 1, head_dim // 2)
+        x_rotated = x_complex * self.freqs_complex
+
+        x_out = torch.view_as_real(x_rotated) #(B, ctx_len, n_heads, head_dim // 2) -> (B, ctx_len, n_heads, head_dim // 2, 2)
+        x_out = x_out.reshape(*x.shape) # (B, ctx_len, n_heads, head_dim // 2, 2) -> (B, ctx_len, n_heads, head_dim)
+        return x_out
+
 class GroupedQueryAttention(nn.Module):
     def __init__(self, config: LlamaConfig):
         super().__init__()
 
-        self.q_proj = nn.Linear(config.n_embd, config.n_embd)
-        self.k_proj = nn.Linear(config.n_embd, config.n_embd)
-        self.v_proj = nn.Linear(config.n_embd, config.n_embd)
-        self.o_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.head_dim = config.n_embd // config.n_heads
+
+        self.q_proj = nn.Linear(config.n_embd, config.n_heads * self.head_dim)
+        self.k_proj = nn.Linear(config.n_embd, config.n_kv_heads * self.head_dim)
+        self.v_proj = nn.Linear(config.n_embd, config.n_kv_heads * self.head_dim)
+        self.o_proj = nn.Linear(config.n_heads * self.head_dim, config.n_embd)
         self.register_buffer('tril', torch.tril(torch.ones((config.ctx_len, config.ctx_len), dtype=torch.long)).view(1, 1, 1, config.ctx_len, config.ctx_len))
+        self.rope = RotaryPositionEmbedding(config)
 
         self.n_heads = config.n_heads
         self.n_kv_heads = config.n_kv_heads
@@ -35,25 +67,28 @@ class GroupedQueryAttention(nn.Module):
     def forward(self, x):
         B, T, C = x.shape
 
-        query = self.q_proj(x).view(B, T, self.n_heads, C // self.n_heads).transpose(1, 2) # (B, n_heads, T, C // n_heads)
-        key = self.k_proj(x).view(B, T, self.n_kv_heads, C // self.n_kv_heads).transpose(1, 2) # (B, kv_heads, T, C // kv_heads)
-        value = self.v_proj(x).view(B, T, self.n_kv_heads, C // self.n_kv_heads).transpose(1, 2) # (B, kv_heads, T, C // kv_heads)
+        query = self.q_proj(x).view(B, T, self.n_heads, self.head_dim) # (B, T, C) -> (B, T, n_heads * head_dim) -> (B, T, n_heads, head_dim)
+        key = self.k_proj(x).view(B, T, self.n_kv_heads, self.head_dim) # (B, T, C) -> (B, T, kv_heads * head_dim) -> (B, T, kv_heads, head_dim)
+        value = self.v_proj(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2) # (B, T, C) -> (B, T, kv_heads * head_dim) -> (B, T, kv_heads, head_dim) -> (B, kv_heads, T, head_dim)
 
-        query = query.view(B, self.n_heads // self.n_kv_heads, self.n_kv_heads, T, C // self.n_heads)
+        query = self.rope(query).transpose(1, 2) # (B, T, n_heads, head_dim) -> (B, n_heads, T, head_dim)
+        key = self.rope(key).transpose(1, 2) # (B, T, n_heads, head_dim) -> (B, n_heads, T, head_dim)
+
+        query = query.view(B, self.n_heads // self.n_kv_heads, self.n_kv_heads, T, self.head_dim)
         key = key.unsqueeze(1).expand(-1, self.n_heads // self.n_kv_heads, -1, -1, -1)
         value = value.unsqueeze(1).expand(-1, self.n_heads // self.n_kv_heads, -1, -1 ,1)
 
-        wei: Tensor = (query @ key.transpose(-2, -1)) / math.sqrt(self.n_heads) # (B, n_heads // kv_heads, kv_heads, T, C // n_heads) @ (B, n_heads // kv_heads, kv_heads, T, C // kv_heads) -> (B, n_heads // kv_heads, kv_heads, T, T)
+        wei: Tensor = (query @ key.transpose(-2, -1)) / math.sqrt(self.n_heads) # (B, n_heads // kv_heads, kv_heads, T, head_dim) @ (B, n_heads // kv_heads, kv_heads, T, head_dim) -> (B, n_heads // kv_heads, kv_heads, T, T)
         wei = wei.masked_fill(self.tril[:, :, :, :T, :T] == 0, float('-inf'))
         wei = wei.softmax(-1)
 
-        out = wei @ value # (B, n_heads // kv_heads, kv_heads, T, T) @ (B, n_heads // kv_heads, kv_heads, T, C // kv_heads) -> (B, n_heads // kv_heads, kv_heads, T, C // kv_heads)
-        out = out.transpose(2, 3).contigous().view(B, self.n_heads // self.n_kv_heads, T, C) # (B, n_heads // kv_heads, kv_heads, T, C // kv_heads) -> (B, n_heads // kv_heads, T, kv_heads, C // kv_heads) -> (B, n_heads // kv_heads, T, C)
-        out = out.transpose(1, 2)[:, :, 0, :] # (B, n_heads // kv_heads, T, C) -> (B, T, n_heads // kv_heads, C) -> (B, T, C)
+        h_out = wei @ value # (B, n_heads // kv_heads, kv_heads, T, T) @ (B, n_heads // kv_heads, kv_heads, T, head_dim) -> (B, n_heads // kv_heads, kv_heads, T, head_dim)
+        h_out = h_out.transpose(2, 3).contigous().view(B, self.n_heads // self.n_kv_heads, T, self.n_kv_heads * self.head_dim) # (B, n_heads // kv_heads, kv_heads, T, head_dim) -> (B, n_heads // kv_heads, T, kv_heads, head_dim) -> (B, n_heads // kv_heads, T, kv_heads * head_dim)
+        h_out = h_out.transpose(1, 2)[:, :, 0, :] # (B, n_heads // kv_heads, T, kv_heads * head_dim) -> (B, T, n_heads // kv_heads, kv_heads * head_dim) -> (B, T, n_heads * head_dim)
         
+        x_out = self.out_proj(h_out) # (B, T, n_heads * head_dim) -> (B, T, C)
         # TODO: dropout before returning?
-        return out
-
+        return x_out
 
 class MLP(nn.Module):
     def __init__(self, config: LlamaConfig) -> None:
