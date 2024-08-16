@@ -37,15 +37,16 @@ class RotaryPositionEmbedding(nn.Module):
         m = torch.arange(0, config.n_embed).to(config.device)
         
         freqs = torch.einsum('i, j -> ij', [m, thetas]).float()
-        self.freqs_complex = torch.polar(torch.ones_like(freqs), freqs)
+        self.freqs_complex = torch.polar(torch.ones_like(freqs), freqs).to(config.device)
 
-    def forward(self, x):
+    def forward(self, x, start_pos: int):
         # x.shape = (B, ctx_len, n_heads, head_dim) where n_heads can be either [n_heads, n_kv_heads]
-        x = x.reshape(*x.shape[:-1], -1, 2)
-        x_complex = torch.view_as_complex(x) # (B, ctx_len, n_heads, head_dim // 2, 2) -> (B, ctx_len, n_heads, head_dim // 2)
+        x_mod = x.reshape(*x.shape[:-1], -1, 2)
+        x_complex = torch.view_as_complex(x_mod) # (B, ctx_len, n_heads, head_dim // 2, 2) -> (B, ctx_len, n_heads, head_dim // 2)
 
-        self.freqs_complex = self.freqs_complex.unsqueeze(0).unsqueeze(2) # (ctx_len, head_dim // 2) -> (1, ctx_len, head_dim // 2) -> (1, ctx_len, 1, head_dim // 2)
-        x_rotated = x_complex * self.freqs_complex
+        freqs_complex = self.freqs_complex[start_pos:start_pos+x.size(1)]
+        freqs_complex = freqs_complex.unsqueeze(0).unsqueeze(2) # (ctx_len, head_dim // 2) -> (1, ctx_len, head_dim // 2) -> (1, ctx_len, 1, head_dim // 2)
+        x_rotated = x_complex * freqs_complex
 
         x_out = torch.view_as_real(x_rotated) #(B, ctx_len, n_heads, head_dim // 2) -> (B, ctx_len, n_heads, head_dim // 2, 2)
         x_out = x_out.reshape(*x.shape) # (B, ctx_len, n_heads, head_dim // 2, 2) -> (B, ctx_len, n_heads, head_dim)
@@ -68,18 +69,18 @@ class GroupedQueryAttention(nn.Module):
         self.n_kv_heads = config.num_key_value_heads
         self.n_embed = config.hidden_size
 
-        self.k_cache = torch.zeros((config.batch_size, config.n_embed, config.num_key_value_heads, self.head_dim))
-        self.v_cache = torch.zeros((config.batch_size, config.n_embed, config.num_key_value_heads, self.head_dim))
+        self.k_cache = torch.zeros((config.batch_size, config.n_embed, config.num_key_value_heads, self.head_dim), device=config.device)
+        self.v_cache = torch.zeros((config.batch_size, config.n_embed, config.num_key_value_heads, self.head_dim), device=config.device)
 
     def forward(self, x, start_pos: int):
         B, T, C = x.shape # (B, 1, C)
 
-        query = self.q_proj(x).view(B, T, self.n_heads, self.head_dim) # (B, 1, C) -> (B, 1, n_heads * head_dim) -> (B, 1, n_heads, head_dim)
-        key = self.k_proj(x).view(B, T, self.n_kv_heads, self.head_dim) # (B, 1, C) -> (B, 1, kv_heads * head_dim) -> (B, 1, kv_heads, head_dim)
-        value = self.v_proj(x).view(B, T, self.n_kv_heads, self.head_dim) # (B, 1, C) -> (B, 1, kv_heads * head_dim) -> (B, 1, kv_heads, head_dim)
+        query = self.q_proj(x).view(B, T, self.n_heads, self.head_dim).to(torch.float16) # (B, 1, C) -> (B, 1, n_heads * head_dim) -> (B, 1, n_heads, head_dim)
+        key = self.k_proj(x).view(B, T, self.n_kv_heads, self.head_dim).to(torch.float16) # (B, 1, C) -> (B, 1, kv_heads * head_dim) -> (B, 1, kv_heads, head_dim)
+        value = self.v_proj(x).view(B, T, self.n_kv_heads, self.head_dim).to(torch.float16) # (B, 1, C) -> (B, 1, kv_heads * head_dim) -> (B, 1, kv_heads, head_dim)
 
-        query = self.rope(query) # (B, 1, n_heads, head_dim)
-        key = self.rope(key) # (B, 1, kv_heads, head_dim)
+        query = self.rope(query, start_pos) # (B, 1, n_heads, head_dim)
+        key = self.rope(key, start_pos) # (B, 1, kv_heads, head_dim)
 
         self.k_cache[:B, start_pos:start_pos + T] = key
         self.v_cache[:B, start_pos:start_pos + T] = value
@@ -93,7 +94,7 @@ class GroupedQueryAttention(nn.Module):
 
         query = query.view(B, self.n_heads // self.n_kv_heads, self.n_kv_heads, T, self.head_dim)
         key = key.unsqueeze(1).expand(-1, self.n_heads // self.n_kv_heads, -1, -1, -1)
-        value = value.unsqueeze(1).expand(-1, self.n_heads // self.n_kv_heads, -1, -1 ,1)
+        value = value.unsqueeze(1).expand(-1, self.n_heads // self.n_kv_heads, -1, -1 ,-1)
 
         wei: Tensor = (query @ key.transpose(-2, -1)) / math.sqrt(self.n_heads) # (B, n_heads // kv_heads, kv_heads, 1, head_dim) @ (B, n_heads // kv_heads, kv_heads, ctx_len, head_dim) -> (B, n_heads // kv_heads, kv_heads, 1, ctx_len)
         # wei = wei.masked_fill(self.tril[:, :, :, :T, :T] == 0, float('-inf'))
@@ -185,10 +186,11 @@ class LlamaCausalLM(nn.Module):
             device = 'cuda'
         )
         
-        if model_args.device == "cuda":
-            torch.set_default_tensor_type(torch.cuda.HalfTensor)
-        else:
-            torch.set_default_tensor_type(torch.BFloat16Tensor)
+        # if model_args.device == "cuda":
+        #     torch.set_default_tensor_type(torch.cuda.HalfTensor)
+        # else:
+        #     torch.set_default_tensor_type(torch.BFloat16Tensor)
+        torch.set_default_dtype(torch.bfloat16)
         
         model = LlamaCausalLM(model_args).to(model_args.device)
 
@@ -197,7 +199,8 @@ class LlamaCausalLM(nn.Module):
             model.load_state_dict(hf_state_dict, strict=True)
             print(f"Loaded state dict in {time.time() - prev_time:.2f}s")
         
-        return LlamaCausalLM(model_args)
+        del hf_model
+        return model
 
     def forward(self, x, start_pos, targets = None):
         # x.shape = (B, 1)
@@ -219,5 +222,23 @@ class LlamaCausalLM(nn.Module):
             pass
             
 
-model = LlamaCausalLM.build("NousResearch/Llama-2-7b-hf", load_model=True)
+
+hf_model_path = "NousResearch/Llama-2-7b-hf"
+
+
+llama_tok = LlamaTokenizer.from_pretrained(hf_model_path)
+prompts = [ "Hello there today is " ]
+tok_prompts = llama_tok(prompts, add_special_tokens=False)['input_ids']
+final_prompts = []
+for p in tok_prompts:
+    prompt = [llama_tok.bos_token_id]
+    prompt.extend(p)
+    final_prompts.append(prompt)
+
+
+model = LlamaCausalLM.build(hf_model_path, load_model=True)
 print("We did it gang")
+
+generated_toks = model.generate(torch.tensor(final_prompts, device='cuda'), max_new_tokens=50)
+
+print(generated_toks)
